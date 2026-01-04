@@ -50,6 +50,7 @@ const (
 	SignalFreshInsider = "FRESH_INSIDER"
 	SignalWhale        = "WHALE"
 	SignalPanicBurst   = "PANIC_BURST"
+	SignalPriceShock   = "PRICE_SHOCK" // New signal for rapid price moves > 5%
 )
 
 // Suspect represents a trade that triggered a detection signal.
@@ -57,6 +58,7 @@ type Suspect struct {
 	Trade      Trade
 	SignalType string
 	Nonce      int // Wallet transaction count (for FRESH_INSIDER)
+	Meta       map[string]interface{} // Extra context (e.g., price delta)
 }
 
 // Alert represents a notification to be sent.
@@ -69,4 +71,3 @@ type Alert struct {
 	SentAt        time.Time
 	Success       bool
 }
-

@@ -15,6 +15,10 @@ type Config struct {
 	// Polymarket WebSocket
 	PolymarketWSURL string
 
+	// Polymarket REST API
+	PolymarketRESTURL string
+	TradePollInterval time.Duration
+
 	// Blockchain RPC
 	AlchemyAPIKey  string
 	AlchemyURL     string
@@ -41,6 +45,10 @@ type Config struct {
 	// Metrics
 	PrometheusPort int
 
+	// UI
+	EnableTUI     bool
+	UIRefreshRate time.Duration
+
 	// Logging
 	LogLevel string
 }
@@ -53,7 +61,9 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		// Polymarket
-		PolymarketWSURL: getEnv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/"),
+		PolymarketWSURL:   getEnv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/"),
+		PolymarketRESTURL: getEnv("POLYMARKET_REST_URL", "https://clob.polymarket.com"),
+		TradePollInterval: time.Duration(getEnvInt("TRADE_POLL_INTERVAL_SECONDS", 3)) * time.Second,
 
 		// RPC
 		AlchemyAPIKey:  getEnv("ALCHEMY_API_KEY", ""),
@@ -80,6 +90,10 @@ func Load() (*Config, error) {
 
 		// Metrics
 		PrometheusPort: getEnvInt("PROMETHEUS_PORT", 9090),
+
+		// UI
+		EnableTUI:     getEnvBool("ENABLE_TUI", true),
+		UIRefreshRate: time.Duration(getEnvInt("UI_REFRESH_MS", 500)) * time.Millisecond,
 
 		// Logging
 		LogLevel: getEnv("LOG_LEVEL", "INFO"),
@@ -161,6 +175,16 @@ func getEnvFloat(key string, defaultValue float64) float64 {
 	if value := os.Getenv(key); value != "" {
 		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
 			return floatVal
+		}
+	}
+	return defaultValue
+}
+
+// getEnvBool retrieves an environment variable as a boolean or returns a default.
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if boolVal, err := strconv.ParseBool(value); err == nil {
+			return boolVal
 		}
 	}
 	return defaultValue
