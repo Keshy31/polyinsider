@@ -59,49 +59,62 @@
 
 | Endpoint | Purpose | Status |
 |----------|---------|--------|
-| `wss://ws-subscriptions-clob.polymarket.com/ws/` | CLOB subscriptions (orderbook, trades) | **Primary** |
-| `wss://ws-live-data.polymarket.com` | Live market data stream | Alternative |
+| `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Market channel (orderbook, price changes) | **Active** ✅ |
+| `wss://ws-subscriptions-clob.polymarket.com/ws/user` | User channel (authenticated trades/orders) | Requires API Key |
+| `https://gamma-api.polymarket.com/markets` | REST API for active markets | **Active** ✅ |
 
-> **⚠️ Implementation Note:** Polymarket's API structure has evolved. We must verify the exact message schema during implementation by:
-> 1. Connecting to the websocket and logging raw messages
-> 2. Cross-referencing with https://docs.polymarket.com/developers/CLOB/websocket/wss-overview
-> 3. Testing subscription channels: `market`, `trades`, `book`
+> **✅ Implementation Complete (Jan 2026):** We verified the API schema through live testing:
+> - Market channel provides `book` and `price_change` events
+> - `book` events include `last_trade_price` field (price only, no size/maker)
+> - Must subscribe to specific `asset_ids` (token IDs) - empty array does NOT subscribe to all
+> - Token IDs fetched dynamically from Gamma API
 
-### 3.2 Expected Message Flow
+### 3.2 Actual Message Flow (Verified)
 
 ```
 ┌──────────┐                              ┌──────────────┐
 │  Client  │                              │  Polymarket  │
 └────┬─────┘                              └──────┬───────┘
      │                                           │
-     │  1. Connect to WSS                        │
+     │  1. Fetch active markets (REST)           │
+     │  GET /markets?active=true&limit=100       │
      │ ─────────────────────────────────────────▶│
      │                                           │
-     │  2. Subscribe to channel                  │
-     │  {"type":"subscribe","channel":"trades",  │
-     │   "assets_ids":["0x123..."]}              │
+     │  2. Extract clobTokenIds from response    │
+     │◀───────────────────────────────────────── │
+     │                                           │
+     │  3. Connect to WSS /ws/market             │
      │ ─────────────────────────────────────────▶│
      │                                           │
-     │  3. Receive trade updates                 │
-     │  {"type":"trade","market":"...",          │
-     │   "maker":"0x...","size":"1000",...}      │
+     │  4. Subscribe with token IDs              │
+     │  {"type":"market",                        │
+     │   "assets_ids":["token1","token2",...]}   │
+     │ ─────────────────────────────────────────▶│
+     │                                           │
+     │  5. Receive orderbook events (array)      │
+     │  [{"event_type":"book","market":"0x...",  │
+     │    "asset_id":"...",                      │
+     │    "last_trade_price":"0.65",             │
+     │    "bids":[...],"asks":[...]}]            │
      │◀───────────────────────────────────────── │
      │                                           │
 ```
 
 ### 3.3 Subscription Strategy
 
-**Option A: Global Feed (Simpler)**
-- Subscribe to all trades across all markets
-- Higher volume, but no need to track market IDs
-- May require filtering by market type (elections, sports, etc.)
+**Current Implementation: Targeted Markets (Option B)**
+- Fetch top 100 active markets from Gamma API at startup
+- Extract `clobTokenIds` from each market (typically 2 per market: YES/NO)
+- Subscribe to all extracted token IDs (~200 tokens)
+- Receive real-time orderbook updates for subscribed markets
 
-**Option B: Targeted Markets (Efficient)**
-- Maintain a list of "hot" market IDs
-- Subscribe only to markets with high liquidity or upcoming events
-- Requires periodic refresh of market list
+**Limitation Discovered:**
+The market channel provides **orderbook data**, not individual trade events. To get actual trades with maker/taker addresses and sizes, we would need:
+1. On-chain event monitoring (Polygon blockchain)
+2. Authenticated user channel (requires API credentials)
+3. REST API polling for recent trades
 
-**Decision:** Start with Option A for Phase 1. We can always filter client-side.
+For Phase 1, we use `last_trade_price` changes as trade signals.
 
 ---
 
@@ -427,35 +440,40 @@ On `SIGINT` / `SIGTERM`:
 polyinsider/
 ├── cmd/
 │   └── engine/
-│       └── main.go              # Entry point, wiring
+│       └── main.go              # Entry point, wiring ✅
 ├── internal/
 │   ├── config/
-│   │   └── config.go            # Env loading, validation
+│   │   └── config.go            # Env loading, validation ✅
 │   ├── ingest/
-│   │   ├── websocket.go         # WS connection, reconnect logic
-│   │   └── parser.go            # JSON deserialization
+│   │   ├── websocket.go         # WS connection, reconnect logic ✅
+│   │   ├── parser.go            # JSON deserialization ✅
+│   │   └── markets.go           # Gamma API client for active markets ✅
 │   ├── enricher/
-│   │   ├── rpc.go               # Alchemy/RPC client
-│   │   └── cache.go             # Nonce cache
+│   │   ├── rpc.go               # Alchemy/RPC client (TODO)
+│   │   └── cache.go             # Nonce cache (TODO)
 │   ├── detector/
-│   │   ├── signals.go           # Signal detection logic
-│   │   └── burst.go             # In-memory burst tracker
+│   │   ├── signals.go           # Signal detection logic (TODO)
+│   │   └── burst.go             # In-memory burst tracker (TODO)
 │   ├── store/
-│   │   ├── sqlite.go            # DB operations
-│   │   └── models.go            # Trade, Alert structs
+│   │   ├── sqlite.go            # DB operations (TODO)
+│   │   └── models.go            # Trade, Alert structs ✅
 │   ├── alert/
-│   │   ├── discord.go           # Webhook client
-│   │   ├── formatter.go         # Message formatting
-│   │   └── batcher.go           # Alert batching logic
+│   │   ├── discord.go           # Webhook client (TODO)
+│   │   ├── formatter.go         # Message formatting (TODO)
+│   │   └── batcher.go           # Alert batching logic (TODO)
 │   └── metrics/
-│       └── prometheus.go        # Metrics registration
-├── .env.example                 # Template for .env
-├── .gitignore
-├── go.mod
-├── go.sum
-├── Makefile                     # Build, run, test commands
+│       └── prometheus.go        # Metrics registration (TODO)
+├── data/                        # SQLite database directory (gitignored)
+├── bin/                         # Compiled binaries (gitignored)
+├── .env.example                 # Template for .env ✅
+├── .env                         # Local config (gitignored)
+├── .gitignore                   # ✅
+├── go.mod                       # ✅
+├── go.sum                       # ✅
+├── Makefile                     # Build, run, test commands ✅
 └── docs/
-    └── PROJ.md                  # This file
+    ├── PROJ.md                  # Project spec (this file) ✅
+    └── TECH.md                  # Technical data flow docs ✅
 ```
 
 ---
@@ -465,27 +483,31 @@ polyinsider/
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | **Polygon RPC Rate Limits** | Missed nonce enrichment | Aggressive filtering (>$2k), fallback RPC, caching |
-| **WebSocket Instability** | Missed trades | Heartbeat monitor, exponential backoff reconnect |
+| **WebSocket Instability** | Missed trades | Heartbeat monitor, exponential backoff reconnect ✅ |
 | **Nonce ≠ True Freshness** | False positives | Nonce only reflects Polygon mainnet. A "fresh" wallet could be a whale's 10th chain. *Accept as limitation in Phase 1.* |
 | **USDC Decimal Precision** | Incorrect value calculation | Verify if API `size` is raw (6 decimals) or already scaled. **Must test.** |
 | **State Loss on Restart** | Missed Panic Burst signals | Acceptable for Phase 1. Document restart procedure. |
 | **Discord Rate Limits** | Delayed alerts | Batching (30s window), respect 429 responses |
+| **Market Channel Limitations** | No maker/taker addresses | Market channel only provides orderbook data. Consider on-chain monitoring or REST API polling for full trade details. ⚠️ *Discovered Jan 2026* |
+| **Token ID Requirement** | Must specify subscriptions | Empty `assets_ids` array doesn't subscribe to all markets. Must fetch active markets first. ✅ *Solved via Gamma API* |
 
 ---
 
 ## 12. Development Milestones
 
-### Milestone 1: Skeleton & Config ✅
-- [ ] Initialize Go module
-- [ ] Set up directory structure
-- [ ] Implement config loading from `.env`
-- [ ] Basic logging setup
+### Milestone 1: Skeleton & Config ✅ (Complete)
+- [x] Initialize Go module
+- [x] Set up directory structure
+- [x] Implement config loading from `.env`
+- [x] Basic logging setup (slog with structured output)
 
-### Milestone 2: WebSocket Ingestion
-- [ ] Connect to Polymarket WebSocket
-- [ ] Parse trade messages
-- [ ] Log raw messages to verify schema
-- [ ] Implement reconnection logic
+### Milestone 2: WebSocket Ingestion ✅ (Complete)
+- [x] Connect to Polymarket WebSocket (`/ws/market` endpoint)
+- [x] Fetch active markets from Gamma API
+- [x] Subscribe to market token IDs
+- [x] Parse `book` and `price_change` events
+- [x] Implement reconnection with exponential backoff
+- [x] Heartbeat monitoring
 
 ### Milestone 3: Signal Detection
 - [ ] Implement value filter (>$2k)
@@ -517,7 +539,7 @@ polyinsider/
 - [ ] Structured logging polish
 
 ### Milestone 8: Hardening
-- [ ] Graceful shutdown
+- [ ] Graceful shutdown (partial - signal handling done)
 - [ ] Error recovery testing
 - [ ] End-to-end test with live data
 

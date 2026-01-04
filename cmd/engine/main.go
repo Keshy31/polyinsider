@@ -11,6 +11,13 @@ import (
 	"time"
 
 	"github.com/polyinsider/engine/internal/config"
+	"github.com/polyinsider/engine/internal/ingest"
+	"github.com/polyinsider/engine/internal/store"
+)
+
+const (
+	// TradeChannelBuffer is the size of the buffered trade channel
+	TradeChannelBuffer = 1000
 )
 
 func main() {
@@ -51,19 +58,125 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Create trade channel
+	tradeChan := make(chan store.Trade, TradeChannelBuffer)
+
+	// Fetch active market token IDs
+	slog.Info("fetching_active_markets")
+	tokenIDs, err := ingest.GetActiveTokenIDs(100)
+	if err != nil {
+		slog.Warn("failed to fetch active markets, will subscribe to empty set", "error", err)
+		tokenIDs = []string{}
+	}
+
+	// Start WebSocket listener with active market tokens
+	listener := ingest.NewListener(cfg.PolymarketWSURL, tradeChan)
+	listener.SetAssetIDs(tokenIDs)
+	listener.Start(ctx)
+
+	// Start trade logger (temporary - will be replaced with workers later)
+	go logTrades(ctx, tradeChan, cfg)
+
+	slog.Info("engine_started", "status", "listening for trades", "subscribed_tokens", len(tokenIDs))
+
 	// Wait for shutdown signal
-	go func() {
-		sig := <-sigChan
-		slog.Info("shutdown_signal_received", "signal", sig.String())
-		cancel()
-	}()
+	sig := <-sigChan
+	slog.Info("shutdown_signal_received", "signal", sig.String())
+	cancel()
 
-	slog.Info("engine_ready", "status", "waiting for shutdown signal (Ctrl+C)")
+	// Graceful shutdown
+	slog.Info("shutting_down", "status", "stopping listener")
+	listener.Stop()
 
-	// Block until context is cancelled
-	<-ctx.Done()
+	// Drain remaining trades
+	drainTrades(tradeChan)
 
 	slog.Info("shutdown_complete")
+}
+
+// logTrades logs incoming trades (temporary until workers are implemented).
+func logTrades(ctx context.Context, tradeChan <-chan store.Trade, cfg *config.Config) {
+	var tradeCount int
+	var filteredCount int
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("trade_logger_stopped",
+				"total_trades", tradeCount,
+				"filtered_trades", filteredCount,
+			)
+			return
+
+		case trade := <-tradeChan:
+			tradeCount++
+
+			// Log all trades at DEBUG level
+			slog.Debug("trade_received",
+				"id", truncateID(trade.TradeID),
+				"market", truncateID(trade.MarketID),
+				"maker", truncateID(trade.MakerAddress),
+				"side", trade.Side,
+				"size", trade.Size,
+				"price", trade.Price,
+				"value_usd", trade.ValueUSD,
+			)
+
+			// Log high-value trades at INFO level
+			if trade.ValueUSD >= cfg.MinValueUSD {
+				filteredCount++
+				slog.Info("high_value_trade",
+					"id", truncateID(trade.TradeID),
+					"market", truncateID(trade.MarketID),
+					"maker", truncateID(trade.MakerAddress),
+					"side", trade.Side,
+					"size", trade.Size,
+					"price", trade.Price,
+					"value_usd", trade.ValueUSD,
+				)
+			}
+
+		case <-ticker.C:
+			slog.Info("trade_stats",
+				"total_trades", tradeCount,
+				"filtered_trades", filteredCount,
+			)
+		}
+	}
+}
+
+// drainTrades processes remaining trades in the channel during shutdown.
+func drainTrades(tradeChan <-chan store.Trade) {
+	timeout := time.After(5 * time.Second)
+	drained := 0
+
+	for {
+		select {
+		case <-tradeChan:
+			drained++
+		case <-timeout:
+			if drained > 0 {
+				slog.Info("trades_drained", "count", drained)
+			}
+			return
+		default:
+			if drained > 0 {
+				slog.Info("trades_drained", "count", drained)
+			}
+			return
+		}
+	}
+}
+
+// truncateID shortens an ID for logging.
+func truncateID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:6] + "..." + id[len(id)-4:]
 }
 
 // setupLogger creates a structured logger with the specified level.
@@ -99,4 +212,3 @@ func setupLogger(levelStr string) *slog.Logger {
 	handler := slog.NewTextHandler(os.Stdout, opts)
 	return slog.New(handler)
 }
-
